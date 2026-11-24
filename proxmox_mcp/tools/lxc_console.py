@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -12,7 +13,14 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-from ..client import PROXMOX_HOST, PROXMOX_PORT, PROXMOX_READ_ONLY, ProxmoxClient, tls_verify
+from ..client import (
+    PROXMOX_HOST,
+    PROXMOX_PORT,
+    PROXMOX_READ_ONLY,
+    PROXMOX_USER,
+    ProxmoxClient,
+    tls_verify,
+)
 
 try:
     import websockets
@@ -140,28 +148,86 @@ def _resolve_secret(ref: str) -> str:
     return result.stdout
 
 
-async def _recv_until(websocket: Any, marker: str, timeout: float) -> str:
-    chunks: list[str] = []
+async def _recv_until_any(
+    websocket: Any,
+    markers: tuple[str, ...],
+    timeout: float,
+    initial: str = "",
+    wait_description: str = "the LXC console",
+    reject_shell_prompt: bool = False,
+) -> str:
+    chunks = [initial] if initial else []
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
+        combined = "".join(chunks)
+        lower = combined.lower()
+        if any(marker.lower() in lower for marker in markers):
+            return combined
+        if reject_shell_prompt and _has_shell_prompt(combined):
+            raise RuntimeError("The LXC console is already in a shell or another login is active")
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            raise TimeoutError("Timed out waiting for the LXC console")
+            raise TimeoutError(
+                f"Timed out waiting for {wait_description} after receiving "
+                f"{len(combined.encode('utf-8'))} bytes"
+            )
         try:
             data = await asyncio.wait_for(websocket.recv(), timeout=remaining)
         except asyncio.TimeoutError as e:
-            raise TimeoutError("Timed out waiting for the LXC console") from e
+            raise TimeoutError(
+                f"Timed out waiting for {wait_description} after receiving "
+                f"{len(combined.encode('utf-8'))} bytes"
+            ) from e
         if isinstance(data, bytes):
             data = data.decode("utf-8", errors="replace")
-        text = _normalize_terminal(data)
-        chunks.append(text)
+        chunks.append(_normalize_terminal(data))
+
+
+async def _recv_until(websocket: Any, marker: str, timeout: float) -> str:
+    return await _recv_until_any(websocket, (marker,), timeout)
+
+
+async def _recv_until_command_end(
+    websocket: Any,
+    start: str,
+    end: str,
+    timeout: float,
+) -> str:
+    chunks: list[str] = []
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
         combined = "".join(chunks)
-        if marker in combined:
-            return combined
+        start_pos = combined.rfind(start)
+        if start_pos >= 0:
+            output = combined[start_pos + len(start) :]
+            end_pos = output.rfind(end)
+            if end_pos >= 0 and re.match(r"\d+\n", output[end_pos + len(end) :]):
+                return combined
+
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for the LXC command to finish")
+        try:
+            data = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("Timed out waiting for the LXC command to finish") from e
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="replace")
+        chunks.append(_normalize_terminal(data))
 
 
 async def _recv_prompt(websocket: Any, timeout: float) -> str:
     return await _recv_until(websocket, "\n", timeout)
+
+
+async def _send_terminal_input(websocket: Any, data: str) -> None:
+    await websocket.send(f"0:{len(data.encode('utf-8'))}:{data}")
+
+
+def _has_shell_prompt(output: str) -> bool:
+    visible = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output).replace("\r", "")
+    lines = visible.splitlines()
+    return bool(lines and re.search(r"[#$]\s*$", lines[-1]))
 
 
 def _websocket_headers(client: ProxmoxClient) -> dict[str, str]:
@@ -170,6 +236,18 @@ def _websocket_headers(client: ProxmoxClient) -> dict[str, str]:
     if client.ticket:
         return {"Cookie": f"PVEAuthCookie={client.ticket}"}
     return {}
+
+
+def _terminal_auth_id(client: ProxmoxClient) -> str:
+    if client.token:
+        token = client.token.removeprefix("PVEAPIToken=")
+        auth_id, separator, _ = token.partition("=")
+        if separator and auth_id:
+            return auth_id
+        raise RuntimeError("Proxmox API token is malformed")
+    if client.ticket:
+        return PROXMOX_USER
+    raise RuntimeError("Proxmox client is not authenticated")
 
 
 async def _login_console(
@@ -196,6 +274,7 @@ async def _login_console(
         websockets.connect(
             url,
             additional_headers=_websocket_headers(client),
+            subprotocols=["binary"],
             ssl=tls_verify(),
             open_timeout=OPERATION_TIMEOUT,
             ping_interval=20,
@@ -204,31 +283,53 @@ async def _login_console(
         timeout=OPERATION_TIMEOUT,
     )
     try:
-        await ws.send(f"{ticket}\n")
-        initial = await asyncio.wait_for(ws.recv(), timeout=OPERATION_TIMEOUT)
+        await ws.send(f"{_terminal_auth_id(client)}:{ticket}\n")
+        try:
+            initial = await asyncio.wait_for(ws.recv(), timeout=OPERATION_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("Timed out waiting for Proxmox terminal handshake") from e
         if isinstance(initial, bytes):
             initial = initial.decode("utf-8", errors="replace")
         initial = _normalize_terminal(initial)
+        if not initial.startswith("OK"):
+            raise RuntimeError("Proxmox rejected the LXC terminal ticket")
 
-        if "login:" not in initial.lower() and "username:" not in initial.lower():
-            await ws.send("\n")
-            initial = await _recv_until(ws, "\n", OPERATION_TIMEOUT)
+        await ws.send("1:80:24:")
+        terminal_output = initial[2:]
+        if not any(marker in terminal_output.lower() for marker in ("login:", "username:")):
+            try:
+                first_output = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=min(2, OPERATION_TIMEOUT),
+                )
+            except asyncio.TimeoutError:
+                first_output = ""
+            if isinstance(first_output, bytes):
+                first_output = first_output.decode("utf-8", errors="replace")
+            terminal_output += _normalize_terminal(first_output)
+        if not any(
+            marker in terminal_output.lower() for marker in ("login:", "username:")
+        ) and not _has_shell_prompt(terminal_output):
+            await _send_terminal_input(ws, "\n")
+        initial = await _recv_until_any(
+            ws,
+            ("login:", "username:"),
+            OPERATION_TIMEOUT,
+            terminal_output,
+            "guest login prompt",
+            reject_shell_prompt=True,
+        )
+        await _send_terminal_input(ws, f"{username}\n")
+        try:
+            await _recv_until_any(
+                ws, ("password:",), OPERATION_TIMEOUT, wait_description="guest password prompt"
+            )
+        except TimeoutError as e:
+            raise RuntimeError("The LXC console did not present a password prompt") from e
 
-        lower = initial.lower()
-        if "login:" not in lower and "username:" not in lower:
-            raise RuntimeError("The LXC console is already in a shell or another login is active")
-
-        await ws.send(f"{username}\n")
-        password_prompt = await asyncio.wait_for(ws.recv(), timeout=OPERATION_TIMEOUT)
-        if isinstance(password_prompt, bytes):
-            password_prompt = password_prompt.decode("utf-8", errors="replace")
-        password_prompt = _normalize_terminal(password_prompt)
-        if "password:" not in password_prompt.lower():
-            raise RuntimeError("The LXC console did not present a password prompt")
-
-        await ws.send(f"{password}\n")
+        await _send_terminal_input(ws, f"{password}\n")
         marker = f"__PVE_LXC_LOGIN_OK_{secrets.token_hex(12)}__"
-        await ws.send(f"printf '\\n{marker}\\n'\n")
+        await _send_terminal_input(ws, f"printf '\\n{marker}\\n'\n")
         response = await _recv_until(ws, marker, OPERATION_TIMEOUT)
         if "login incorrect" in response.lower() or "authentication failure" in response.lower():
             raise RuntimeError("Guest login failed: invalid username or password")
@@ -243,25 +344,26 @@ async def _login_console(
 async def _run_marked(session: ConsoleSession, command: str) -> tuple[str, int]:
     start = f"__PVE_LXC_START_{secrets.token_hex(12)}__"
     end = f"__PVE_LXC_END_{secrets.token_hex(12)}__"
-    wrapped = (
-        f"printf '\\n{start}\\n'; "
-        f"{command}; "
-        f"rc=$?; printf '\\n{end}%s\\n' \"$rc\""
-    )
+    wrapped = f"printf '\\n{start}\\n'; {command}; rc=$?; printf '\\n{end}%s\\n' \"$rc\""
     async with session.lock:
         session.last_used = asyncio.get_running_loop().time()
-        await session.websocket.send(wrapped + "\n")
-        response = await _recv_until(session.websocket, end, OPERATION_TIMEOUT)
+        await _send_terminal_input(session.websocket, wrapped + "\n")
+        response = await _recv_until_command_end(
+            session.websocket,
+            start,
+            end,
+            OPERATION_TIMEOUT,
+        )
 
     response = _normalize_terminal(response)
     marker_pos = response.rfind(start)
     if marker_pos < 0:
         raise RuntimeError("The command output marker was incomplete")
-    output = response[marker_pos + len(start):]
+    output = response[marker_pos + len(start) :]
     end_pos = output.rfind(end)
     if end_pos < 0:
         raise RuntimeError("The command end marker was incomplete")
-    tail = output[end_pos + len(end):].lstrip()
+    tail = output[end_pos + len(end) :].lstrip()
     output = output[:end_pos].replace("\n\n", "\n").strip("\n")
     exit_text = tail.splitlines()[0].strip() if tail else ""
     try:
@@ -329,7 +431,7 @@ async def logout(session_id: str) -> dict[str, Any]:
         raise ValueError("Unknown or expired LXC console session")
     confirmed = False
     try:
-        await session.websocket.send("exit\n")
+        await _send_terminal_input(session.websocket, "exit\n")
         response = await _recv_until(session.websocket, "login:", OPERATION_TIMEOUT)
         confirmed = "login:" in response.lower()
     except Exception:
@@ -358,8 +460,8 @@ async def list_directory(session_id: str, path: str, limit: int = 1000) -> dict[
     session = await _get_session(session_id)
     limit = min(max(1, limit), 1000)
     script = (
-        "import json, os, sys; "
-        "p=sys.argv[1]; "
+        "import json, os, sys\n"
+        "p=sys.argv[1]\n"
         "try:\n"
         " e=sorted(os.scandir(p), key=lambda x:x.name)\n"
         " print(json.dumps({'entries':[{'name':x.name,'type':'directory' if x.is_dir(follow_symlinks=False) else 'file'} for x in e[:int(sys.argv[2])]], 'truncated':len(e)>int(sys.argv[2])}))\n"
@@ -371,19 +473,22 @@ async def list_directory(session_id: str, path: str, limit: int = 1000) -> dict[
     if exit_code != 0:
         raise RuntimeError(f"Directory operation failed with exit code {exit_code}")
     import json
+
     try:
         return json.loads(output)
     except json.JSONDecodeError as e:
         raise RuntimeError("The guest returned an invalid directory listing") from e
 
 
-async def read_file(session_id: str, path: str, offset: int = 0, length: int | None = None) -> dict[str, Any]:
+async def read_file(
+    session_id: str, path: str, offset: int = 0, length: int | None = None
+) -> dict[str, Any]:
     session = await _get_session(session_id)
     offset = max(0, offset)
     length = min(MAX_FILE_LENGTH, max(1, length or MAX_FILE_LENGTH))
     script = (
-        "import base64, json, os, sys; "
-        "p=sys.argv[1]; o=int(sys.argv[2]); n=int(sys.argv[3]); "
+        "import base64, json, os, sys\n"
+        "p=sys.argv[1]; o=int(sys.argv[2]); n=int(sys.argv[3])\n"
         "try:\n"
         " f=open(p,'rb'); f.seek(o); b=f.read(n+1); f.close(); "
         " more=len(b)>n; b=b[:n]; "
@@ -396,6 +501,7 @@ async def read_file(session_id: str, path: str, offset: int = 0, length: int | N
     if exit_code != 0:
         raise RuntimeError(f"File operation failed with exit code {exit_code}")
     import json
+
     try:
         result = json.loads(output)
     except json.JSONDecodeError as e:
