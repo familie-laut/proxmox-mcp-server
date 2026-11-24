@@ -61,30 +61,30 @@ _VMID = r"(?P<vmid>[1-9][0-9]{2,8})"
 TEMPLATES: list[tuple[ResourceTemplate, re.Pattern[str], str]] = [
     (
         ResourceTemplate(
-            uri_template="proxmox://nodes/{node}/status",
+            uriTemplate="proxmox://nodes/{node}/status",
             name="Node status",
             description="CPU, memory, load, uptime and versions of one node.",
-            mime_type=MIME,
+            mimeType=MIME,
         ),
         re.compile(rf"proxmox://nodes/{_NODE}/status"),
         "/nodes/{node}/status",
     ),
     (
         ResourceTemplate(
-            uri_template="proxmox://vms/{node}/{vmid}/config",
+            uriTemplate="proxmox://vms/{node}/{vmid}/config",
             name="VM config",
             description="Configuration of one QEMU VM.",
-            mime_type=MIME,
+            mimeType=MIME,
         ),
         re.compile(rf"proxmox://vms/{_NODE}/{_VMID}/config"),
         "/nodes/{node}/qemu/{vmid}/config",
     ),
     (
         ResourceTemplate(
-            uri_template="proxmox://cts/{node}/{vmid}/config",
+            uriTemplate="proxmox://cts/{node}/{vmid}/config",
             name="Container config",
             description="Configuration of one LXC container.",
-            mime_type=MIME,
+            mimeType=MIME,
         ),
         re.compile(rf"proxmox://cts/{_NODE}/{_VMID}/config"),
         "/nodes/{node}/lxc/{vmid}/config",
@@ -94,7 +94,7 @@ TEMPLATES: list[tuple[ResourceTemplate, re.Pattern[str], str]] = [
 
 def list_resources() -> list[Resource]:
     return [
-        Resource(uri=s.uri, name=s.name, description=s.description, mime_type=MIME) for s in STATIC
+        Resource(uri=s.uri, name=s.name, description=s.description, mimeType=MIME) for s in STATIC
     ]
 
 

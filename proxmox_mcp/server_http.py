@@ -40,6 +40,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import auth, pdm_client
 from .client import PROXMOX_HOST
 from .server import _validate_config, app, pdm, proxmox, startup_summary, tls_warnings
+from .tools import lxc_console
 
 # Clients reach a loopback-bound server under these Host/Origin values.
 _LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -135,6 +136,7 @@ def build_asgi_app(
             async with manager.run():
                 yield
         finally:
+            await lxc_console.close_all()
             await proxmox.close()
             await pdm.close()
 

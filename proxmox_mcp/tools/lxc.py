@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..client import ProxmoxClient
+from . import lxc_console
 
 NODE = {"type": "string", "description": "Node name (e.g. pve01)"}
 VMID = {"type": "integer", "description": "Container ID"}
@@ -424,8 +425,13 @@ TOOLS = [
     },
 ]
 
+TOOLS.extend(lxc_console.TOOLS)
+
 
 async def handle(name: str, args: dict[str, Any], client: ProxmoxClient) -> Any:
+    if name.startswith("lxc_console") or name in ("lxc_list_directory", "lxc_read_file"):
+        return await lxc_console.handle(name, args, client)
+
     node = args.get("node", "")
     vmid = args.get("vmid", "")
     base = f"/nodes/{node}/lxc"

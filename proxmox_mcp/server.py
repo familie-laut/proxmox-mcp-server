@@ -18,6 +18,9 @@ Configuration (environment variables). Set PROXMOX_HOST, PDM_HOST, or both:
     PROXMOX_WAIT_TIMEOUT     Seconds a `wait` lasts before returning (default: 900)
     PROXMOX_AUDIT_LOG        File (or "stderr") for a JSON-lines log of every write call
     PROXMOX_AUDIT_READS      Log read calls too (default: false)
+    PROXMOX_LXC_EXEC         Enable LXC console bash execution (default: false)
+    PROXMOX_LXC_SESSION_TIMEOUT  Idle LXC console session timeout in seconds (default: 900)
+    PROXMOX_LXC_OPERATION_TIMEOUT  LXC console operation timeout in seconds (default: 30)
     PDM_HOST, PDM_PORT, PDM_TOKEN_ID, PDM_TOKEN_SECRET, PDM_CA_BUNDLE, PDM_TLS_NAME, PDM_VERIFY_SSL
                              Proxmox Datacenter Manager; loads the `pdm` toolset (see pdm_client.py)
     PDM_PROTECTED_GUESTS     remote:ID entries PDM tools may not change, e.g. pve01:104,*:9000-9010
@@ -55,6 +58,7 @@ from mcp.types import (
 from . import audit, auth, guards, pdm_client, prompts, registry, resources, tasks
 from .client import PROXMOX_HOST, PROXMOX_READ_ONLY, ProxmoxClient, tls_warning
 from .client import _validate_config as _validate_pve_config
+from .tools import lxc_console
 from .tools import pdm as pdm_tools
 
 # --- Build the tool registry ---
@@ -95,7 +99,10 @@ except ValueError as e:
 ALL_TOOLS, TOOL_MODULE = registry.build(
     TOOLSETS, read_only=PROXMOX_READ_ONLY, no_destructive=NO_DESTRUCTIVE, core=WITH_CORE
 )
-SCHEMAS = {t.name: t.input_schema for t in ALL_TOOLS}
+SCHEMAS = {
+    t.name: getattr(t, "input_schema", getattr(t, "inputSchema", {}))
+    for t in ALL_TOOLS
+}
 
 
 def startup_summary() -> str:
@@ -238,12 +245,11 @@ async def read_resource(uri: str, who: auth.Principal = auth.STDIO) -> ReadResou
             entry["ms"] = round((time.monotonic() - started) * 1000)
             audit.record(entry)
     return ReadResourceResult(
-        contents=[TextResourceContents(uri=uri, mime_type=resources.MIME, text=text)]
+        contents=[TextResourceContents(uri=uri, mimeType=resources.MIME, text=text)]
     )
 
 
 # --- MCP protocol handlers ---
-
 
 async def _on_list_tools(
     ctx: ServerRequestContext, _: PaginatedRequestParams | None
@@ -325,6 +331,7 @@ async def main() -> None:
                 app.create_initialization_options(),
             )
     finally:
+        await lxc_console.close_all()
         await proxmox.close()
         await pdm.close()
 

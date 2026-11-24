@@ -32,6 +32,7 @@ _TOOL_SECRETS: dict[str, frozenset[str]] = {
     "update_acme_plugin": frozenset({"data"}),
     "create_webhook_endpoint": frozenset({"header"}),  # may hold Authorization headers
     "vm_agent_exec": frozenset({"input-data"}),  # stdin, often a password or key
+    "lxc_console_login": frozenset({"secret_ref"}),
 }
 
 

@@ -84,7 +84,10 @@ ALIASES = {"vms": "qemu", "vm": "qemu", "containers": "lxc", "ct": "lxc"}
 
 # Tools whose name does not say what they do to the cluster.
 # These only GET, though their names do not start with get_/list_:
-_READS = {"vm_agent_exec_status", "wait_for_task"}
+_READS = {
+    "vm_agent_exec_status",
+    "wait_for_task",
+}
 # These POST (they open a console ticket), though their names start with get_:
 _WRITES = {"get_vm_vnc_proxy", "get_vm_spice_proxy"}
 
@@ -112,6 +115,7 @@ _DESTRUCTIVE = {
     "vm_agent_exec",
     "vm_agent_set_user_password",
     "change_user_password",
+    "lxc_console_exec",
 }
 
 
@@ -180,10 +184,10 @@ def build(
                 Tool(
                     name=name,
                     description=d["description"],
-                    input_schema=schema,
+                    inputSchema=schema,
                     annotations=ToolAnnotations(
-                        read_only_hint=ro,
-                        destructive_hint=False if ro else is_destructive(name),
+                        readOnlyHint=ro,
+                        destructiveHint=False if ro else is_destructive(name),
                     ),
                 )
             )

@@ -1432,6 +1432,60 @@
           ],
           "read_only": false,
           "destructive": true
+        },
+        {
+          "name": "lxc_console_login",
+          "description": "Log in to a running LXC console with an explicitly selected guest user.",
+          "inputs": [
+            "node",
+            "vmid",
+            "username",
+            "secret_ref"
+          ],
+          "read_only": false,
+          "destructive": false
+        },
+        {
+          "name": "lxc_console_logout",
+          "description": "Log out of an LXC console and close its session.",
+          "inputs": [
+            "session_id"
+          ],
+          "read_only": false,
+          "destructive": false
+        },
+        {
+          "name": "lxc_list_directory",
+          "description": "List a directory in an authenticated LXC console session.",
+          "inputs": [
+            "session_id",
+            "path",
+            "limit (optional)"
+          ],
+          "read_only": false,
+          "destructive": false
+        },
+        {
+          "name": "lxc_read_file",
+          "description": "Read a bounded range from a file in an authenticated LXC console session.",
+          "inputs": [
+            "session_id",
+            "path",
+            "offset (optional)",
+            "length (optional)"
+          ],
+          "read_only": false,
+          "destructive": false
+        },
+        {
+          "name": "lxc_console_exec",
+          "description": "Run a bash command in an authenticated LXC console session.",
+          "inputs": [
+            "session_id",
+            "command"
+          ],
+          "read_only": false,
+          "destructive": true
         }
       ]
     },
